@@ -1,0 +1,290 @@
+---
+- name: Universal Zero-Trust Linux Hardening Framework
+  hosts: hardened_nodes
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Load variable mapping structures
+      ansible.builtin.include_vars: vars_mapping.yml
+
+    - name: Enforce dynamic environment fact targeting
+      ansible.builtin.set_fact:
+        target_env: >-
+          {{
+            arch_vars if ansible_facts['os_family'] == 'Archlinux' else
+            debian_vars if ansible_facts['os_family'] == 'Debian' else
+            fedora_vars if (ansible_facts['distribution'] == 'Fedora' or ansible_facts['os_family'] == 'RedHat') else
+            suse_vars if ansible_facts['os_family'] == 'Suse' else none
+          }}
+
+    - name: Validate that target architecture mapping succeeded
+      ansible.builtin.meta: end_play
+      when: target_env is none
+
+  tasks:
+    # Layer 1: Secure Package Engine
+    - name: Ensure all core security and monitoring packages are installed
+      ansible.builtin.package:
+        name: "{{ target_env.core_packages }}"
+        state: present
+
+    # Layer 2a: Hybrid Memory Tuning
+    - name: Apply kernel memory optimizations for dynamic ZRAM execution
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-memory-tuning.conf
+        content: |
+          vm.swappiness = 150
+          vm.page_cluster = 0
+          vm.dirty_background_ratio = 5
+          vm.dirty_ratio = 10
+          vm.vfs_cache_pressure = 500
+          vm.compaction_proactiveness = 80
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Kernel Parameters
+
+    # Layer 2b: Dynamic Kernel Hardening Controls
+    - name: Apply defensive sysctl restrictions against host/network vector drops
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kernel-hardening.conf
+        content: |
+          kernel.dmesg_restrict = 1
+          kernel.kptr_restrict = 2
+          net.ipv4.ip_forward = 0
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.tcp_syncookies = 1
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Kernel Parameters
+
+    # Layer 2c: Dynamic ZRAM Configuration Setup
+    - name: Deploy priority parameters to systemd-zram swap configuration
+      ansible.builtin.copy:
+        dest: "{{ target_env.zram_conf_path }}"
+        content: |
+          [zram0]
+          zram-size = ram
+          swap-priority = 100
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Configuration
+
+    # Layer 3: Atomic Swapfile Allocation (Btrfs / Standard Dual-Path)
+    - name: Query state metrics of existing fallback swap files
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swap_file_check
+
+    - name: Safe Swapfile Provisioning Pipeline
+      when: not swap_file_check.stat.exists or swap_file_check.stat.size == 0
+      block:
+        - name: Identify active root partition filesystem footprint
+          ansible.builtin.set_fact:
+            root_fstype: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | map(attribute='fstype') | first }}"
+
+        - name: Allocate native Btrfs swap space cleanly
+          ansible.builtin.command: btrfs filesystem mkswapfile --size 2g /swapfile
+          when: root_fstype == 'btrfs'
+          register: btrfs_swap_job
+          changed_when: true
+
+        - name: Fallback allocation stream for legacy filesystems (Ext4/XFS)
+          when: root_fstype != 'btrfs'
+          block:
+            - name: Generate contiguous non-sparse structural block layout
+              ansible.builtin.command: dd if=/dev/zero of=/swapfile bs=1M count=2048
+            - name: Inject swap operational header tags onto file block
+              ansible.builtin.command: mkswap /swapfile
+
+    - name: Secure physical permission access matrices on swap file structure
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Map fallback storage file definition into systemic filesystem table
+      ansible.posix.mount:
+        path: none
+        src: /swapfile
+        fstype: swap
+        opts: sw,pri=10
+        state: present
+
+    - name: Activate backing swap structure with low scheduler scheduling flags
+      ansible.builtin.command: swapon -a -e
+      changed_when: false
+    # Layer 4: Host Daemon Shielding (Earlyoom, Arpwatch, ClamAV)
+    - name: Restrict user-space OOM mitigation thresholds
+      ansible.builtin.copy:
+        dest: /etc/default/earlyoom
+        content: |
+          EARLYOOM_ARGS="-m 10 -s 10 --avoid '^(systemd|sshd|tmux|bash)\(' --prefer '^(chrome\vert{}firefox\vert{}clamd\vert{}clamav-daemon\vert{}snort)\)'"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Earlyoom Daemon
+
+    - name: Stabilize earlyoom background visibility state
+      ansible.builtin.service:
+        name: earlyoom
+        state: started
+        enabled: true
+
+    - name: Structure systemd template mapping folder configuration for Arpwatch
+      ansible.builtin.file:
+        path: /etc/systemd/system/arpwatch@.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Bind secure user accounts to dynamic Arpwatch instantiation rule definitions
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/arpwatch@.service.d/override.conf
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/bin/arpwatch -N -f /var/lib/arpwatch/arp.dat -i %I -u {{ target_env.arpwatch_user }}
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Configuration
+
+    - name: Structure custom cgroup resource throttling slice folder for ClamAV
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ target_env.clamav_service }}.service.d"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Enforce strict CPU runtime quotas and max memory boundaries on ClamAV
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ target_env.clamav_service }}.service.d/override.conf"
+        content: |
+          [Service]
+          Nice=19
+          CPUQuota=10%
+          CPUSchedulingPolicy=idle
+          MemoryMax=1.2G
+          MemoryHigh=1.0G
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Configuration
+
+    # Layer 5: File System Integrity and Auditing Infrastructure
+    - name: Write core user identification and system modification tracking metrics to auditd
+      ansible.builtin.copy:
+        dest: "{{ target_env.audit_rules_path }}"
+        content: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /usr/sbin/insmod -p x -k modules
+          -w /usr/sbin/rmmod -p x -k modules
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Regenerate Auditd Rules
+
+    - name: Query operational availability status of system AIDE hash registry
+      ansible.builtin.stat:
+        path: "{{ target_env.aide_db_path }}"
+      register: aide_db_state
+
+    - name: Initialize corporate host signature snapshot data structures
+      ansible.builtin.command: aide --init
+      register: aide_initialization_job
+      changed_when: true
+      when: not aide_db_state.stat.exists
+
+    - name: Commit clean file verification snapshot baseline database to active memory
+      ansible.builtin.copy:
+        src: "{{ target_env.aide_db_new_path }}"
+        dest: "{{ target_env.aide_db_path }}"
+        remote_src: true
+      changed_when: true
+      when: not aide_db_state.stat.exists and aide_initialization_job is succeeded
+
+    # Layer 6: Post-Install Posture Integrity Compilation
+    - name: Extract running system sysctl configurations
+      ansible.builtin.command: sysctl kernel.dmesg_restrict kernel.kptr_restrict net.ipv4.tcp_syncookies
+      register: kernel_audit_status
+      changed_when: false
+
+    - name: Query current memory page tier tracking layout properties
+      ansible.builtin.command: swapon --show=NAME,TYPE,SIZE,PRIO
+      register: swap_priority_status
+      changed_when: false
+
+    - name: Fetch execution metadata loops from core zero-trust services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      loop:
+        - earlyoom
+        - "{{ target_env.clamav_service }}"
+        - firewalld
+      register: service_matrix_status
+
+    - name: Compile cryptographic validation dashboard log
+      ansible.builtin.template:
+        dest: /root/hardening-verification-report.md
+        content: |
+          # Universal Hardening Framework Verification Report
+          Host: {{ ansible_facts['hostname'] }} | Timestamp: {{ ansible_facts['date_time']['iso8601'] }}
+
+          ## 1. Active Kernel Hardening Settings
+          ```text
+          {{ kernel_audit_status.stdout }}
+          ```
+
+          ## 2. Hybrid Memory Layout (ZRAM & Swapfile Priorities)
+          ```text
+          {{ swap_priority_status.stdout }}
+          ```
+
+          ## 3. Core Defensive Service Operational Matrix
+          {% for svc in service_matrix_status.results %}
+          * **Service:** `{{ svc.item }}` -> ActiveState: *{{ svc.status.ActiveState | default('unknown') }}* | LoadState: *{{ svc.status.LoadState | default('unknown') }}*
+          {% endfor %}
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Output report pointer indicators to terminal display buffers
+      ansible.builtin.debug:
+        msg:
+          - "=========================================================="
+          - "      ZERO-TRUST POST-INSTALL HARDENING REPORT GENERATED  "
+          - "=========================================================="
+          - "Report Location: /root/hardening-verification-report.md"
+
+  handlers:
+    - name: Reload Kernel Parameters
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Reload Systemd Configuration
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart Earlyoom Daemon
+      ansible.builtin.service:
+        name: earlyoom
+        state: restarted
+
+    - name: Regenerate Auditd Rules
+      ansible.builtin.command: >-
+        {{
+          'auditctl -R ' + target_env.audit_rules_path
+          if ansible_facts['os_family'] == 'Archlinux'
+          else 'augenrules --load'
+        }}
+      changed_when: true
+
