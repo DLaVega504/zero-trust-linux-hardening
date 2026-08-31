@@ -21,7 +21,6 @@
     - name: Validate that target architecture mapping succeeded
       ansible.builtin.meta: end_play
       when: target_env is none
-
   tasks:
     # Layer 1: Secure Package Engine
     - name: Ensure all core security and monitoring packages are installed
@@ -73,11 +72,11 @@
         group: root
         mode: '0644'
       notify: Reload Systemd Configuration
-
-    # Layer 3: Atomic Swapfile Allocation (Btrfs / Standard Dual-Path)
-    - name: Query state metrics of existing fallback swap files
+  
+      # Layer 3: Atomic Swapfile Allocation (Btrfs Subvolume Aware)
+    - name: Query state metrics of existing structural backup swap files
       ansible.builtin.stat:
-        path: /swapfile
+        path: /swap/swapfile
       register: swap_file_check
 
     - name: Safe Swapfile Provisioning Pipeline
@@ -87,38 +86,57 @@
           ansible.builtin.set_fact:
             root_fstype: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | map(attribute='fstype') | first }}"
 
-        - name: Allocate native Btrfs swap space cleanly
-          ansible.builtin.command: btrfs filesystem mkswapfile --size 2g /swapfile
-          when: root_fstype == 'btrfs'
+        - name: Ensure target swap mount destination directory exists
+          ansible.builtin.file:
+            path: /swap
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Allocate native Btrfs swap space cleanly within subvolume mount
+          ansible.builtin.command: btrfs filesystem mkswapfile --size 2g /swap/swapfile
+          when: root_fstype == 'btrfs' and not ansible_check_mode
           register: btrfs_swap_job
           changed_when: true
 
         - name: Fallback allocation stream for legacy filesystems (Ext4/XFS)
-          when: root_fstype != 'btrfs'
+          when: root_fstype != 'btrfs' and not ansible_check_mode
           block:
             - name: Generate contiguous non-sparse structural block layout
-              ansible.builtin.command: dd if=/dev/zero of=/swapfile bs=1M count=2048
+              ansible.builtin.command: dd if=/dev/zero of=/swap/swapfile bs=1M count=2048
+              changed_when: true
             - name: Inject swap operational header tags onto file block
-              ansible.builtin.command: mkswap /swapfile
+              ansible.builtin.command: mkswap /swap/swapfile
+              changed_when: true
 
     - name: Secure physical permission access matrices on swap file structure
       ansible.builtin.file:
-        path: /swapfile
+        path: /swap/swapfile
         owner: root
         group: root
         mode: '0600'
+      when: swap_file_check.stat.exists or (btrfs_swap_job is defined and btrfs_swap_job.skipped is not defined) or ansible_check_mode
 
     - name: Map fallback storage file definition into systemic filesystem table
       ansible.posix.mount:
-        path: none
-        src: /swapfile
+        path: "none"
+        src: /swap/swapfile
         fstype: swap
-        opts: sw,pri=10
+        opts: "sw,pri=10,discard,nodev,nosuid,noexec"
         state: present
+      when: swap_file_check.stat.exists or ansible_check_mode
+
+    - name: Check swap activation status to enforce process idempotency
+      ansible.builtin.command: swapon --show=NAME --noheadings
+      register: active_swaps
+      changed_when: false
 
     - name: Activate backing swap structure with low scheduler scheduling flags
       ansible.builtin.command: swapon -a -e
-      changed_when: false
+      when: "'/swap/swapfile' not in active_swaps.stdout and not ansible_check_mode"
+      changed_when: true
+
     # Layer 4: Host Daemon Shielding (Earlyoom, Arpwatch, ClamAV)
     - name: Restrict user-space OOM mitigation thresholds
       ansible.builtin.copy:
@@ -179,6 +197,9 @@
         mode: '0644'
       notify: Reload Systemd Configuration
 
+    - name: Force systemd configuration reloads prior to runtime validation loops
+      ansible.builtin.meta: flush_handlers
+
     # Layer 5: File System Integrity and Auditing Infrastructure
     - name: Write core user identification and system modification tracking metrics to auditd
       ansible.builtin.copy:
@@ -233,7 +254,7 @@
       register: service_matrix_status
 
     - name: Compile cryptographic validation dashboard log
-      ansible.builtin.template:
+      ansible.builtin.copy:
         dest: /root/hardening-verification-report.md
         content: |
           # Universal Hardening Framework Verification Report
