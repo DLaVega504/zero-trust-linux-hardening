@@ -50,4 +50,3 @@ ansible-playbook -i hosts.ini Linux-Hardening.yml --syntax-check
 # 2. Run the secure production deployment pipeline
 ansible-playbook -i hosts.ini Linux-Hardening.yml
 ```
-
