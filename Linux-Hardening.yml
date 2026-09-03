@@ -94,7 +94,7 @@
     # =========================================================================
     - name: Query state metrics of existing structural backup swap files
       ansible.builtin.stat:
-        path: /swap/swapfile
+        path: /swapfile_mount/swapfile
       register: swap_file_check
 
     - name: Safe Swapfile Provisioning Pipeline
