@@ -21,14 +21,19 @@
     - name: Validate that target architecture mapping succeeded
       ansible.builtin.meta: end_play
       when: target_env is none
+
   tasks:
-    # Layer 1: Secure Package Engine
+    # =========================================================================
+    # LAYER 1: SECURE PACKAGE ENGINE
+    # =========================================================================
     - name: Ensure all core security and monitoring packages are installed
       ansible.builtin.package:
         name: "{{ target_env.core_packages }}"
         state: present
 
-    # Layer 2a: Hybrid Memory Tuning
+    # =========================================================================
+    # LAYER 2A: HYBRID MEMORY TUNING
+    # =========================================================================
     - name: Apply kernel memory optimizations for dynamic ZRAM execution
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-memory-tuning.conf
@@ -44,7 +49,9 @@
         mode: '0644'
       notify: Reload Kernel Parameters
 
-    # Layer 2b: Dynamic Kernel Hardening Controls
+    # =========================================================================
+    # LAYER 2B: DYNAMIC KERNEL HARDENING CONTROLS
+    # =========================================================================
     - name: Apply defensive sysctl restrictions against host/network vector drops
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-kernel-hardening.conf
@@ -60,7 +67,17 @@
         mode: '0644'
       notify: Reload Kernel Parameters
 
-    # Layer 2c: Dynamic ZRAM Configuration Setup
+    # =========================================================================
+    # LAYER 2C: DYNAMIC ZRAM CONFIGURATION SETUP
+    # =========================================================================
+    - name: Ensure parent systemd allocation directory trees exist
+      ansible.builtin.file:
+        path: "{{ target_env.zram_conf_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Deploy priority parameters to systemd-zram swap configuration
       ansible.builtin.copy:
         dest: "{{ target_env.zram_conf_path }}"
@@ -72,8 +89,9 @@
         group: root
         mode: '0644'
       notify: Reload Systemd Configuration
-  
-      # Layer 3: Atomic Swapfile Allocation (Btrfs Subvolume Aware)
+    # =========================================================================
+    # LAYER 3: ATOMIC SWAPFILE ALLOCATION (BTRFS SUBVOLUME AWARE)
+    # =========================================================================
     - name: Query state metrics of existing structural backup swap files
       ansible.builtin.stat:
         path: /swap/swapfile
@@ -137,19 +155,21 @@
       when: "'/swap/swapfile' not in active_swaps.stdout and not ansible_check_mode"
       changed_when: true
 
-    # Layer 4: Host Daemon Shielding (Earlyoom, Arpwatch, ClamAV)
+    # =========================================================================
+    # LAYER 4: HOST DAEMON SHIELDING (EARLYOOM, ARPWATCH, CLAMAV)
+    # =========================================================================
     - name: Restrict user-space OOM mitigation thresholds
       ansible.builtin.copy:
         dest: /etc/default/earlyoom
         content: |
-          EARLYOOM_ARGS="-m 10 -s 10 --avoid '^(systemd|sshd|tmux|bash)\(' --prefer '^(chrome\vert{}firefox\vert{}clamd\vert{}clamav-daemon\vert{}snort)\)'"
+          EARLYOOM_ARGS="-m 10 -s 10 --avoid '^(systemd|sshd|tmux|bash)$' --prefer '^(chrome|firefox|clamd|clamav-daemon|snort)$'"
         owner: root
         group: root
         mode: '0644'
       notify: Restart Earlyoom Daemon
 
-    - name: Stabilize earlyoom background visibility state
-      ansible.builtin.service:
+    - name: Stabilize earlyoom configuration state parameters
+      ansible.builtin.systemd:
         name: earlyoom
         state: started
         enabled: true
@@ -197,10 +217,31 @@
         mode: '0644'
       notify: Reload Systemd Configuration
 
+    # =========================================================================
+    # LAYER 4B: INTEGRATED FIREWALL LEAK-PROTECTION TOGGLES
+    # =========================================================================
+    - name: Verify that the firewalld management utility is active and initialized
+      ansible.builtin.systemd:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Provision persistent alias shortcuts for defensive kill-switch toggles
+      ansible.builtin.copy:
+        dest: /etc/profile.d/firewall-killswitches.sh
+        content: |
+          # Firewalld Dual-Kill Switch Toggles
+          alias portalon="sudo firewall-cmd --zone=public --add-interface=wls1"
+          alias portaloff="sudo firewall-cmd --zone=block --add-interface=wls1"
+        owner: root
+        group: root
+        mode: '0644'
+
     - name: Force systemd configuration reloads prior to runtime validation loops
       ansible.builtin.meta: flush_handlers
-
-    # Layer 5: File System Integrity and Auditing Infrastructure
+    # =========================================================================
+    # LAYER 5: FILE SYSTEM INTEGRITY AND AUDITING INFRASTRUCTURE
+    # =========================================================================
     - name: Write core user identification and system modification tracking metrics to auditd
       ansible.builtin.copy:
         dest: "{{ target_env.audit_rules_path }}"
@@ -220,7 +261,7 @@
       register: aide_db_state
 
     - name: Initialize corporate host signature snapshot data structures
-      ansible.builtin.command: aide --init
+      ansible.builtin.command: nice -n 19 aide --init
       register: aide_initialization_job
       changed_when: true
       when: not aide_db_state.stat.exists
@@ -233,7 +274,9 @@
       changed_when: true
       when: not aide_db_state.stat.exists and aide_initialization_job is succeeded
 
-    # Layer 6: Post-Install Posture Integrity Compilation
+    # =========================================================================
+    # LAYER 6: POST-INSTALL POSTURE INTEGRITY COMPILATION
+    # =========================================================================
     - name: Extract running system sysctl configurations
       ansible.builtin.command: sysctl kernel.dmesg_restrict kernel.kptr_restrict net.ipv4.tcp_syncookies
       register: kernel_audit_status
@@ -286,6 +329,9 @@
           - "=========================================================="
           - "Report Location: /root/hardening-verification-report.md"
 
+  # =========================================================================
+  # TASK HANDLERS AND NOTIFICATION EXECUTIONS
+  # =========================================================================
   handlers:
     - name: Reload Kernel Parameters
       ansible.builtin.command: sysctl --system
